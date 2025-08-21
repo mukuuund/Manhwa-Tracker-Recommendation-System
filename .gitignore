@@ -1,0 +1,12 @@
+# Ignore environment files
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+
+# Ignore system/IDE files
+.vscode/
+.DS_Store
+Thumbs.db
