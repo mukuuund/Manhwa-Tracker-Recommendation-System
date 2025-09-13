@@ -212,6 +212,7 @@ async def telegram_latest_all_dialogs(
 
     return out
 
+
 # ============== AniList lookups =============
 def anilist_data(data: dict):
     """
@@ -478,6 +479,100 @@ def store_trending_famous(famous: List[dict]):
     cur.close()
     conn.close()
 
+# ======== NEW: persist scan results into `series` ========
+def upsert_series(local: Dict[str, list], tg: Dict[str, tuple]) -> None:
+    """
+    Writes latest local and telegram chapter info into `series`.
+    Preserves your schema; uses title + canonical and updates maxima.
+    """
+    if not local:
+        return
+    conn = get_connection()
+    if not conn:
+        return
+    cur = conn.cursor()
+
+    rows = []
+    for title, (last_local, local_channel, local_mtime) in local.items():
+        tg_ch, tg_src, tg_link, tg_dt = tg.get(title, (0.0, None, None, None))
+        rows.append((
+            title.strip(),
+            canonicalize_title(title),
+            float(last_local or 0.0),
+            local_channel,
+            float(tg_ch or 0.0),
+            tg_src,
+            tg_link,
+            (tg_dt.replace(tzinfo=None) if isinstance(tg_dt, datetime) else None)
+        ))
+
+    cur.executemany("""
+        INSERT INTO series
+            (title, canonical,
+             local_latest_chapter, channel,
+             telegram_latest_chapter, telegram_source, telegram_link, telegram_seen_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        ON DUPLICATE KEY UPDATE
+            local_latest_chapter    = GREATEST(COALESCE(VALUES(local_latest_chapter),0), COALESCE(series.local_latest_chapter,0)),
+            telegram_latest_chapter = GREATEST(COALESCE(VALUES(telegram_latest_chapter),0), COALESCE(series.telegram_latest_chapter,0)),
+            channel                 = COALESCE(VALUES(channel), series.channel),
+            telegram_source         = COALESCE(VALUES(telegram_source), series.telegram_source),
+            telegram_link           = COALESCE(VALUES(telegram_link), series.telegram_link),
+            telegram_seen_at        = IFNULL(GREATEST(COALESCE(VALUES(telegram_seen_at), series.telegram_seen_at), series.telegram_seen_at), COALESCE(VALUES(telegram_seen_at), series.telegram_seen_at)),
+            updated_at              = CURRENT_TIMESTAMP;
+    """, rows)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+# ======== NEW: persist AniList metadata into `manhwa_meta` ========
+def upsert_manhwa_meta(meta_rows: List[dict]) -> None:
+    """
+    Updates or inserts rows in `manhwa_meta` WITHOUT requiring a UNIQUE key.
+    Uses search_title as the natural key via UPDATE-then-INSERT per row.
+    """
+    if not meta_rows:
+        return
+    conn = get_connection()
+    if not conn:
+        return
+    cur = conn.cursor()
+
+    for m in meta_rows:
+        search_title = (m.get("search") or m.get("display") or "").strip()
+        if not search_title:
+            continue
+        display = (m.get("display") or "")[:255]
+        status = (m.get("status") or "")[:64]
+        chapters_total = m.get("chapters")
+        genres_json = json.dumps(m.get("genres") or [])
+        description = m.get("description") or ""
+
+        # Try UPDATE first
+        cur.execute("""
+            UPDATE manhwa_meta
+               SET display = %s,
+                   status = %s,
+                   chapters_total = %s,
+                   genres = CAST(%s AS JSON),
+                   description = %s,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE search_title = %s
+        """, (display, status, chapters_total, genres_json, description, search_title))
+
+        if cur.rowcount == 0:
+            # No existing row → INSERT
+            cur.execute("""
+                INSERT INTO manhwa_meta
+                    (search_title, display, status, chapters_total, genres, description, updated_at)
+                VALUES (%s,%s,%s,%s,CAST(%s AS JSON),%s, CURRENT_TIMESTAMP)
+            """, (search_title, display, status, chapters_total, genres_json, description))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
 # ================== Main ====================
 if __name__ == "__main__":
     load_dotenv()
@@ -493,10 +588,14 @@ if __name__ == "__main__":
     # Telegram scan
     tg = asyncio.run(telegram_latest_all_dialogs(API_ID, API_HASH, titles, recent_scan=600))
 
-    # Optional: fetch AniList info for your local titles
-    # anilist_list = anilist_data(local)
+    # ===== NEW: persist latest scan results =====
+    upsert_series(local, tg)
 
-    # Build rows for console view
+    # Optional: fetch AniList info for your local titles and persist to manhwa_meta
+    meta_rows = anilist_data(local)
+    upsert_manhwa_meta(meta_rows)
+
+    # Build rows for console view (unchanged)
     rows = []
     for t in sorted(titles, key=str.casefold):
         last_local, src_local, local_mtime = (local.get(t) or [0.0, None, None])
@@ -525,7 +624,7 @@ if __name__ == "__main__":
     # Compare with local
     have_it, missing = match_famous_with_local(famous, titles)
 
-    # Print
+    # Print (unchanged)
     print("\n=== Currently Famous Manhwas (AniList • TRENDING) ===")
     for i, f in enumerate(famous, 1):
         print(f"{i:>2}. {f['display']}  | score={f['averageScore']}  favs={f['favourites']}  pop={f['popularity']}  -> {f['siteUrl']}")
