@@ -1,12 +1,22 @@
-# Ignore environment files
-.env
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
 *.sqlite3
 
-# Ignore system/IDE files
+# Environment
+.env
+*.env
+
+# Telegram session
+*.session
+*.session-journal
+
+# VSCode
 .vscode/
+tempCodeRunnerFile.py
+
+# OS/system files
 .DS_Store
 Thumbs.db
